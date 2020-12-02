@@ -1,0 +1,80 @@
+# =========================== GPU Settings ===========================
+gpu_ids: '0'
+float16: True
+seed: 42
+
+name: celeba_gate_conv_V0
+restore: False
+
+# =========================== DATA Settings ===========================
+dataset: 'celeba'  # 'places2', 'celeba', 'shanghaitech'
+mask_type: 'hyper' # 'irregular', 'regular', 'segmentation', 'hyper'=irregular+segmentation
+min_brush: 2
+max_brush: 5
+hyper_mask_rate: 0.5
+train_seg_path: '../../coco_mask/train'
+val_seg_path: '../../coco_mask/val'
+input_size: 256
+flip: True
+center_crop: False
+
+# data
+data_flist:
+  celeba: [
+    'data/celeba/train_list.txt',
+    'data/celeba/val_list.txt'
+  ]
+  places2: [
+    'data/places2/train_list.txt',
+    'data/places2/val_list.txt'
+  ]
+  places2_subset: [
+    'data/places2_subset/train_list.txt',
+    'data/places2_subset/val_list.txt'
+  ]
+  shanghaitech: [
+    'data/shanghaitech/train_list.txt',
+    'data/shanghaitech/val_list.txt'
+  ]
+
+# =========================== MODEL Settings ===========================
+gan_type: 'nsgan' # 'nsgan', 'hinge'
+norm: 'IN'
+dim: 64
+model_type: 'EC' # 'UNET', 'EC'
+layer_nums: [3,8,3] # {encoder_layers},{middle_layers},{decoder_layers}
+dis_spectral_norm: True
+gen_spectral_norm: True
+econv_type: 'gate' # 'gate', 'normal'
+dconv_type: 'gate' # 'gate', 'normal'
+dis_conv_type: 'normal' # 'gate', 'normal'
+
+# =========================== LOSS Settings ===========================
+adv_loss_weight: 0.1
+mask_l1_loss_weight: 0.5
+valid_l1_loss_weight: 0.5
+vgg_loss: True
+mask_vgg_loss_weight: 0.05
+valid_vgg_loss_weight: 0.05
+vgg_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+vgg_norm: True
+style_loss_weight: 250
+
+# =========================== Training Settings ===========================
+d_lr: 2e-5
+g_lr: 2e-4
+beta1: 0                    # adam optimizer beta1
+beta2: 0.9                  # adam optimizer beta2
+batch_size: 16
+max_iters: 300000
+drop_steps: 80000
+drop_gamma: 0.5
+
+# =========================== Validation Settings ===========================
+eval_iters: 10000
+save_iters: 1000
+sample_iters: 1000
+sample_nums: 16
+log_iters: 100
+FID_test: True
+FID_path: 'data/celeba/test_256'
