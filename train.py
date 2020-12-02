@@ -8,6 +8,7 @@ from shutil import copyfile
 from utils import Config
 from torch.utils.data import DataLoader
 from dataloader import InpaintingDataset
+from src.models import Model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -68,4 +69,4 @@ if __name__ == '__main__':
         shuffle=False
     )
 
-    model = CombineModel(args, device, is_train=True)
+    model = Model(config)
