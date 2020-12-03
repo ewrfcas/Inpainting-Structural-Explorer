@@ -5,6 +5,7 @@ import torchvision.transforms.functional
 
 try:
     from apex import amp
+
     amp.register_float_function(torch, 'matmul')
 except ImportError:
     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
@@ -203,12 +204,17 @@ class VGG19(torch.nn.Module):
         for param in self.parameters():
             param.requires_grad = False
 
+        self.mean = [0.485, 0.456, 0.406]
+        self.std = [0.229, 0.224, 0.225]
+
     def forward(self, x):
         if self.vgg_norm:
-            x = (x + 1) / 2 # -1~1 --> 0~1
+            x = (x + 1) / 2  # -1~1 --> 0~1
             # 由0~1重新归一化
-            x = torchvision.transforms.functional.normalize(x, mean=[0.485, 0.456, 0.406],
-                                                            std=[0.229, 0.224, 0.225])
+            mean = torch.as_tensor(self.mean, dtype=x.dtype, device=x.device)
+            std = torch.as_tensor(self.std, dtype=x.dtype, device=x.device)
+            x.sub_(mean[None,:, None, None]).div_(std[None,:, None, None])
+
         relu1_1 = self.relu1_1(x)
         relu1_2 = self.relu1_2(relu1_1)
 

@@ -4,7 +4,7 @@ import os
 import torch.optim as optim
 from src.layers import GateConv, ResnetBlock, Conv, spectral_norm
 from src.loss import VGG19, PerceptualLoss, StyleLoss, AdversarialLoss
-from utils import torch_show_all_params
+from utils.utils import torch_show_all_params, get_lr_schedule_with_steps
 import torch.nn.functional as F
 
 try:
@@ -13,71 +13,6 @@ try:
     amp.register_float_function(torch, 'matmul')
 except ImportError:
     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
-
-
-class BaseModel(nn.Module):
-    def __init__(self, name, config):
-        super(BaseModel, self).__init__()
-        self.config = config
-        self.iteration = 0
-        self.name = name
-        self.g_path = os.path.join(config.path, name + '_g')
-        self.d_path = os.path.join(config.path, name + '_d')
-
-    def load(self):
-        g_path = self.g_path + '_last.pth'
-        if self.config.restore is False:
-            if os.path.exists(g_path.replace('_last.pth', '_best_fid.pth')):
-                g_path = g_path.replace('_last.pth', '_best_fid.pth')
-        if os.path.exists(g_path):
-            print('Loading %s generator...' % g_path)
-            if torch.cuda.is_available():
-                data = torch.load(g_path)
-            else:
-                data = torch.load(g_path, map_location=lambda storage, loc: storage)
-            self.g_model.load_state_dict(data['g_model'])
-            if self.config.restore:
-                self.g_opt.load_state_dict(data['g_opt'])
-            self.iteration = data['iteration']
-        else:
-            print(g_path, 'not Found')
-            raise FileNotFoundError
-
-        d_path = self.d_path + '_last.pth'
-        if self.config.restore is False:
-            if os.path.exists(d_path.replace('_last.pth', '_best_fid.pth')):
-                d_path = d_path.replace('_last.pth', '_best_fid.pth')
-        if self.config.restore:
-            if os.path.exists(d_path):
-                print('Loading %s generator...' % d_path)
-                if torch.cuda.is_available():
-                    data = torch.load(d_path)
-                else:
-                    data = torch.load(d_path, map_location=lambda storage, loc: storage)
-                self.d_model.load_state_dict(data['d_model'])
-                if self.config.restore:
-                    self.d_opt.load_state_dict(data['d_opt'])
-            else:
-                print(d_path, 'not Found')
-                raise FileNotFoundError
-        else:
-            print('No need for discriminator during testing')
-
-    def save(self, prefix=None):
-        if prefix is not None:
-            save_g_path = self.g_path + "_{}.pth".format(prefix)
-            save_d_path = self.d_path + "_{}.pth".format(prefix)
-        else:
-            save_g_path = self.g_path + ".pth"
-            save_d_path = self.d_path + ".pth"
-
-        print('\nsaving %s...\n' % self.name)
-        torch.save({'iteration': self.iteration,
-                    'g_model': self.g_model.state_dict(),
-                    'g_opt': self.g_opt.state_dict()}, save_g_path)
-
-        torch.save({'d_model': self.d_model.state_dict(),
-                    'd_opt': self.d_opt.state_dict()}, save_d_path)
 
 
 def get_generator(config, input_channel):
@@ -93,7 +28,7 @@ def get_conv(conv_type):
     elif conv_type == 'normal':
         return Conv
     else:
-        return NotImplementedError
+        raise NotImplementedError
 
 
 def get_norm(norm_type):
@@ -102,7 +37,7 @@ def get_norm(norm_type):
     elif norm_type == 'BN':
         return nn.BatchNorm2d
     else:
-        return NotImplementedError
+        raise NotImplementedError
 
 
 class ECGenerator(nn.Module):
@@ -114,18 +49,18 @@ class ECGenerator(nn.Module):
         ch = config.dim
 
         # encoder
-        self.encoder = [nn.ReflectionPad2d(3),
-                        econv(in_channels=input_channel, out_channels=ch, kernel_size=7,
-                              padding=0, use_spectral_norm=config.gen_spectral_norm),
-                        norm(ch),
-                        nn.ReLU(True)]
+        encoder = [nn.ReflectionPad2d(3),
+                   econv(in_channels=input_channel, out_channels=ch, kernel_size=7,
+                         padding=0, use_spectral_norm=config.gen_spectral_norm),
+                   norm(ch),
+                   nn.ReLU(True)]
         for _ in range(config.layer_nums[0] - 1):
             ch *= 2
-            self.encoder.extend([econv(in_channels=ch // 2, out_channels=ch, kernel_size=4,
-                                       stride=2, padding=1, use_spectral_norm=config.gen_spectral_norm),
-                                 norm(ch),
-                                 nn.ReLU(True)])
-        self.encoder = nn.Sequential(*self.encoder)
+            encoder.extend([econv(in_channels=ch // 2, out_channels=ch, kernel_size=4,
+                                  stride=2, padding=1, use_spectral_norm=config.gen_spectral_norm),
+                            norm(ch),
+                            nn.ReLU(True)])
+        self.encoder = nn.Sequential(*encoder)
 
         # middle
         blocks = []
@@ -135,17 +70,17 @@ class ECGenerator(nn.Module):
 
         # decoder
         dconv = get_conv(config.dconv_type)
-        self.decoder = []
+        decoder = []
         for _ in range(config.layer_nums[2] - 1):
-            self.decoder.extend([dconv(in_channels=ch, out_channels=ch // 2, kernel_size=4, stride=2,
-                                       padding=1, transpose=True, use_spectral_norm=config.gen_spectral_norm),
-                                 norm(ch // 2),
-                                 nn.ReLU(True)])
+            decoder.extend([dconv(in_channels=ch, out_channels=ch // 2, kernel_size=4, stride=2,
+                                  padding=1, transpose=True, use_spectral_norm=config.gen_spectral_norm),
+                            norm(ch // 2),
+                            nn.ReLU(True)])
             ch = ch // 2
-        self.decoder.extend([nn.ReflectionPad2d(3),
-                             nn.Conv2d(in_channels=ch, out_channels=3, kernel_size=7, padding=0),
-                             nn.Tanh()])
-        self.decoder = nn.Sequential(*self.decoder)
+        decoder.extend([nn.ReflectionPad2d(3),
+                        nn.Conv2d(in_channels=ch, out_channels=3, kernel_size=7, padding=0),
+                        nn.Tanh()])
+        self.decoder = nn.Sequential(*decoder)
 
     def forward(self, x, mask=None):
         x = self.encoder(x)
@@ -199,16 +134,23 @@ class Discriminator(nn.Module):
         return outputs, [conv1, conv2, conv3, conv4, conv5]
 
 
-class Model(BaseModel):
-    def __init__(self, config):
-        super(Model, self).__init__(config.model_type, config)
+class Model(nn.Module):
+    def __init__(self, config, logger=None):
+        super(Model, self).__init__()
+        self.config = config
+        self.iteration = 0
+        self.name = config.model_type
+        self.g_path = os.path.join(config.path, self.name + '_g')
+        self.d_path = os.path.join(config.path, self.name + '_d')
 
         self.g_model = get_generator(config, input_channel=4).to(config.device)
         self.d_model = Discriminator(config, in_channels=3).to(config.device)
-        print('Generator:')
-        torch_show_all_params(self.g_model)
-        print('Discriminator:')
-        torch_show_all_params(self.d_model)
+        if logger is not None:
+            logger.info('Generator Parameters:{}'.format(torch_show_all_params(self.g_model)))
+            logger.info('Discriminator Parameters:{}'.format(torch_show_all_params(self.d_model)))
+        else:
+            print('Generator Parameters:{}'.format(torch_show_all_params(self.g_model)))
+            print('Discriminator Parameters:{}'.format(torch_show_all_params(self.d_model)))
 
         # loss
         self.l1_loss = nn.L1Loss(reduction='none').to(config.device)
@@ -219,9 +161,17 @@ class Model(BaseModel):
         self.eps = 1e-7
 
         self.g_opt = optim.Adam(params=self.g_model.parameters(),
-                                lr=config.g_lr, betas=(config.beta1, config.beta2))
+                                lr=float(config.g_lr), betas=(config.beta1, config.beta2))
         self.d_opt = optim.Adam(params=self.d_model.parameters(),
-                                lr=config.d_lr, betas=(config.beta1, config.beta2))
+                                lr=float(config.d_lr), betas=(config.beta1, config.beta2))
+        self.d_sche = get_lr_schedule_with_steps(config.decay_type,
+                                                 self.d_opt,
+                                                 drop_steps=config.drop_steps,
+                                                 gamma=config.drop_gamma)
+        self.g_sche = get_lr_schedule_with_steps(config.decay_type,
+                                                 self.g_opt,
+                                                 drop_steps=config.drop_steps,
+                                                 gamma=config.drop_gamma)
 
         if config.float16:
             self.float16 = True
@@ -272,19 +222,19 @@ class Model(BaseModel):
         mask_g_l1_loss = torch.mean(torch.sum(g_l1_loss * mask_, dim=[2, 3]) / mask_sum)
         valid_g_l1_loss = torch.mean(torch.sum(g_l1_loss * (1 - mask_), dim=[2, 3]) / valid_sum)
         g_l1_loss = mask_g_l1_loss * self.config.mask_l1_loss_weight + \
-                      valid_g_l1_loss * self.config.valid_l1_loss_weight
+                    valid_g_l1_loss * self.config.valid_l1_loss_weight
         g_loss += g_l1_loss
 
         # generator perceptual loss
-        g_perceptual_losses = self.perceptual_loss(fake_img, real_img)
+        perceptual_losses = self.perceptual_loss(fake_img, real_img)
         perceptual_loss = 0.0
-        for perceptual_loss in g_perceptual_losses:
-            mask_ = F.interpolate(mask, size=(perceptual_loss.shape[2], perceptual_loss.shape[3]))
-            mask_ = mask_.repeat(1, perceptual_loss.shape[1], 1, 1)
+        for perceptual_loss_ in perceptual_losses:
+            mask_ = F.interpolate(mask, size=(perceptual_loss_.shape[2], perceptual_loss_.shape[3]))
+            mask_ = mask_.repeat(1, perceptual_loss_.shape[1], 1, 1)
             mask_sum = torch.sum(mask_, dim=[2, 3]) + self.eps
             valid_sum = torch.sum(1 - mask_, dim=[2, 3]) + self.eps
-            mask_perceptual_loss = torch.mean(torch.sum(perceptual_loss * mask_, dim=[2, 3]) / mask_sum)
-            valid_perceptual_loss = torch.mean(torch.sum(perceptual_loss * (1 - mask_), dim=[2, 3]) / valid_sum)
+            mask_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * mask_, dim=[2, 3]) / mask_sum)
+            valid_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * (1 - mask_), dim=[2, 3]) / valid_sum)
             perceptual_loss += (mask_perceptual_loss * self.config.mask_vgg_loss_weight + \
                                 valid_perceptual_loss * self.config.valid_vgg_loss_weight)
         g_loss += perceptual_loss
@@ -323,3 +273,58 @@ class Model(BaseModel):
             else:
                 g_loss.backward()
         self.g_opt.step()
+
+        self.d_sche.step()
+        self.g_sche.step()
+
+    def load(self, is_test=False):
+        g_path = self.g_path + '_last.pth'
+        if self.config.restore or is_test:
+            if is_test and os.path.exists(g_path.replace('_last.pth', '_best_fid.pth')):
+                g_path = g_path.replace('_last.pth', '_best_fid.pth')
+            if os.path.exists(g_path):
+                print('Loading %s generator...' % g_path)
+                if torch.cuda.is_available():
+                    data = torch.load(g_path)
+                else:
+                    data = torch.load(g_path, map_location=lambda storage, loc: storage)
+                self.g_model.load_state_dict(data['g_model'])
+                if self.config.restore:
+                    self.g_opt.load_state_dict(data['g_opt'])
+                self.iteration = data['iteration']
+            else:
+                print(g_path, 'not Found')
+                raise FileNotFoundError
+
+        d_path = self.d_path + '_last.pth'
+        if self.config.restore and not is_test:  # 判别器不加载best_fid，因为只会在训练的时候用到
+            if os.path.exists(d_path):
+                print('Loading %s discriminator...' % d_path)
+                if torch.cuda.is_available():
+                    data = torch.load(d_path)
+                else:
+                    data = torch.load(d_path, map_location=lambda storage, loc: storage)
+                self.d_model.load_state_dict(data['d_model'])
+                if self.config.restore:
+                    self.d_opt.load_state_dict(data['d_opt'])
+            else:
+                print(d_path, 'not Found')
+                raise FileNotFoundError
+        else:
+            print('No need for discriminator during testing')
+
+    def save(self, prefix=None):
+        if prefix is not None:
+            save_g_path = self.g_path + "_{}.pth".format(prefix)
+            save_d_path = self.d_path + "_{}.pth".format(prefix)
+        else:
+            save_g_path = self.g_path + ".pth"
+            save_d_path = self.d_path + ".pth"
+
+        print('\nsaving {} {}...\n'.format(self.name, prefix))
+        torch.save({'iteration': self.iteration,
+                    'g_model': self.g_model.state_dict(),
+                    'g_opt': self.g_opt.state_dict()}, save_g_path)
+
+        torch.save({'d_model': self.d_model.state_dict(),
+                    'd_opt': self.d_opt.state_dict()}, save_d_path)

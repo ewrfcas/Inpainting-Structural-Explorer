@@ -5,17 +5,21 @@ import numpy as np
 import torch
 import argparse
 from shutil import copyfile
-from utils import Config
+from utils.utils import Config, Progbar, to_cuda, postprocess, stitch_images, imsave
+from src.metrics import get_inpainting_metrics
+from utils.logger import setup_logger
 from torch.utils.data import DataLoader
-from dataloader import InpaintingDataset
+from src.dataloader import InpaintingDataset
 from src.models import Model
+import time
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--path', type=str, default='./check_points',
-                        help='model checkpoints path (default: ./checkpoints)')
+    parser.add_argument('--path', type=str, required=True, help='model checkpoints path')
+    parser.add_argument('--gpu', type=str, required=True, help='gpu ids')
 
     args = parser.parse_args()
+    args.path = os.path.join('check_points', args.path)
     config_path = os.path.join(args.path, 'config.yml')
 
     # create checkpoints path if does't exist
@@ -29,6 +33,16 @@ if __name__ == '__main__':
     # load config file
     config = Config(config_path)
     config.path = args.path
+    config.gpu_ids = args.gpu
+
+    log_file = 'log-{}.txt'.format(time.time())
+    logger = setup_logger(os.path.join(args.path, 'logs'), logfile_name=log_file)
+    for k in config._dict:
+        logger.info("{}:{}".format(k, config._dict[k]))
+
+    # save samples and eval pictures
+    os.makedirs(os.path.join(args.path, 'samples'), exist_ok=True)
+    os.makedirs(os.path.join(args.path, 'eval'), exist_ok=True)
 
     # cuda visble devices
     os.environ['CUDA_VISIBLE_DEVICES'] = config.gpu_ids
@@ -54,19 +68,102 @@ if __name__ == '__main__':
     # load dataset
     train_list = config.data_flist[config.dataset][0]
     val_list = config.data_flist[config.dataset][1]
+    val_fix_mask = config.data_flist[config.dataset][2]
+    train_dataset = InpaintingDataset(config, train_list,
+                                      irr_mask_path=config.irregular_path,
+                                      seg_mask_path=config.train_seg_path,
+                                      training=True)
     train_loader = DataLoader(
-        dataset=InpaintingDataset(config, train_list, config.train_seg_path, training=True),
+        dataset=train_dataset,
         batch_size=config.batch_size,
         num_workers=8,
         drop_last=True,
         shuffle=True
     )
+    val_dataset = InpaintingDataset(config, val_list,
+                                    fix_mask_path=val_fix_mask,
+                                    training=False)
     val_loader = DataLoader(
-        dataset=InpaintingDataset(config, val_list, config.val_seg_path, training=False),
+        dataset=val_dataset,
         batch_size=config.batch_size,
-        num_workers=4,
+        num_workers=2,
         drop_last=False,
         shuffle=False
     )
+    sample_iterator = val_dataset.create_iterator(config.sample_size)
 
-    model = Model(config)
+    model = Model(config, logger=logger)
+    model.load(is_test=False)
+    steps_per_epoch = len(train_dataset) // config.batch_size
+    iteration = model.iteration
+    epoch = model.iteration // steps_per_epoch
+    logger.info('Start from epoch:{}, iteration:{}'.format(epoch, iteration))
+
+    model.train()
+    keep_training = True
+    best_score = {}
+    while (keep_training):
+        epoch += 1
+
+        stateful_metrics = ['epoch', 'iter', 'g_lr']
+        progbar = Progbar(len(train_dataset), max_iters=steps_per_epoch,
+                          width=20, stateful_metrics=stateful_metrics)
+        for items in train_loader:
+            model.train()
+            items = to_cuda(items, config.device)
+            _, g_loss, d_loss, logs = model.get_losses(items)
+            model.backward(g_loss=g_loss, d_loss=d_loss)
+            iteration = model.iteration
+
+            logs = [("epoch", epoch), ("iter", iteration), ('g_lr', model.g_sche.get_lr()[0])] + logs
+            progbar.add(config.batch_size, values=logs)
+
+            if iteration % config.log_iters == 0:
+                logger.debug(str(logs))
+
+            if iteration % config.sample_iters == 0:
+                model.eval()
+                with torch.no_grad():
+                    items = next(sample_iterator)
+                    items = to_cuda(items, config.device)
+                    fake_img = model(items['img'], items['mask'])
+
+                    images = stitch_images(postprocess(items['img']),
+                                           postprocess(items['img'] * (1 - items['mask']) + items['mask']),
+                                           postprocess(fake_img),
+                                           img_per_row=2)
+                sample_name = os.path.join(args.path, 'samples', str(iteration).zfill(7) + ".png")
+
+                print('\nsaving sample {}\n'.format(sample_name))
+                images.save(sample_name)
+
+            if iteration % config.eval_iters == 0:
+                model.eval()
+                eval_progbar = Progbar(len(val_dataset), width=20)
+                index = 0
+                with torch.no_grad():
+                    for items in val_loader:
+                        items = to_cuda(items, config.device)
+                        fake_img = model(items['img'], items['mask'])
+                        fake_img = postprocess(fake_img)  # [b, h, w, 3]
+                        for i in range(fake_img.shape[0]):
+                            sample_name = os.path.join(args.path, 'eval', val_dataset.load_name(index))
+                            imsave(fake_img[i], sample_name)
+                            index += 1
+
+                        eval_progbar.add(fake_img.shape[0])
+
+                score_dict = get_inpainting_metrics(config.eval_path, os.path.join(args.path, 'eval'),
+                                                    logger, fid_test=config.fid_test)
+                if config.save_best and 'fid' in score_dict:
+                    if 'fid' not in best_score or best_score['fid'] >= score_dict['fid']:
+                        best_score = score_dict.copy()
+                        best_score['iteration'] = iteration
+                        model.save(prefix='best_fid')
+
+            if iteration % config.save_iters == 0:
+                model.save(prefix='last')
+
+            if iteration >= config.max_iters:
+                keep_training = False
+                break

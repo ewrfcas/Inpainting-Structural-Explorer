@@ -7,18 +7,29 @@ import torchvision.transforms.functional as F
 from torch.utils.data import DataLoader
 import cv2
 from PIL import Image
-from utils import irregular_mask
+from utils.utils import irregular_mask
 
 
 class InpaintingDataset(torch.utils.data.Dataset):
-    def __init__(self, config, flist, mask_path, training=True):
+    def __init__(self, config, flist,
+                 irr_mask_path=None, seg_mask_path=None,
+                 fix_mask_path=None, training=True):
         super(InpaintingDataset, self).__init__()
         self.config = config
         self.training = training
         self.data = self.load_flist(flist)
-        self.seg_masks = self.load_flist(mask_path)
-        # if testing, mask must be fixed and mask num = data num
-        assert training is True or len(self.seg_masks) != len(self.data)
+        self.data = sorted(self.data, key=lambda x: x.split('/')[-1])
+        self.irr_masks = []
+        self.seg_masks = []
+        self.fix_masks = []
+        if irr_mask_path is not None:
+            self.irr_masks = self.load_flist(irr_mask_path)
+        if seg_mask_path is not None:
+            self.seg_masks = self.load_flist(seg_mask_path)
+        if fix_mask_path is not None:
+            self.fix_masks = self.load_flist(fix_mask_path)
+        if not training:
+            assert len(self.fix_masks) == len(self.data)
 
     def __len__(self):
         return len(self.data)
@@ -46,7 +57,10 @@ class InpaintingDataset(torch.utils.data.Dataset):
         if self.training is True and self.config.flip is True:
             if random.random() < 0.5:
                 img = img[:, ::-1, ...]
+            if random.random() < 0.5:
                 mask = mask[:, ::-1, ...]
+            if random.random() < 0.5:
+                mask = mask[::-1, :, ...]
 
         img = self.to_tensor(img, norm=True)  # norm to -1~1
         mask = self.to_tensor(mask)
@@ -60,21 +74,18 @@ class InpaintingDataset(torch.utils.data.Dataset):
 
         # test mode: load mask non random
         if self.training is False:
-            mask = cv2.imread(self.seg_masks[index], cv2.IMREAD_GRAYSCALE)
+            mask = cv2.imread(self.fix_masks[index], cv2.IMREAD_GRAYSCALE)
             mask = cv2.resize(mask, (imgw, imgh), interpolation=cv2.INTER_NEAREST)
             mask = (mask > 127).astype(np.uint8) * 255
             return mask
         else:  # train mode: 50% mask with random brush, 50% mask with
             if random.random() < self.config.hyper_mask_rate:
-                mask = irregular_mask(imgh, imgw,
-                                      min_width=int(12 * (imgh / 256)),
-                                      max_width=int(40 * (imgh / 256)),
-                                      min_brush=self.config.min_brush,
-                                      max_brush=self.config.max_brush)  # [h,w,1]
-                mask *= 255
+                mask_index = random.randint(0, len(self.irr_masks) - 1)
+                mask = cv2.imread(self.irr_masks[mask_index], cv2.IMREAD_GRAYSCALE)
             else:
                 mask_index = random.randint(0, len(self.seg_masks) - 1)
                 mask = cv2.imread(self.seg_masks[mask_index], cv2.IMREAD_GRAYSCALE)
+            if mask.shape[0] != imgh or mask.shape[1] != imgw:
                 mask = cv2.resize(mask, (imgw, imgh), interpolation=cv2.INTER_NEAREST)
             mask = (mask > 127).astype(np.uint8) * 255  # threshold due to interpolation
             return mask

@@ -5,6 +5,8 @@ from PIL import Image, ImageDraw
 import math
 import yaml
 import os
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import LambdaLR
 
 
 # irregular mask generation
@@ -63,8 +65,6 @@ class Config(object):
             self._dict = yaml.load(self._yaml)
             self._dict['path'] = os.path.dirname(config_path)
 
-        self.print()
-
     def __getattr__(self, name):
         if self._dict.get(name) is not None:
             return self._dict[name]
@@ -78,6 +78,7 @@ class Config(object):
         print('')
         print('---------------------------------')
         print('')
+
 
 class Progbar(object):
     """Displays a progress bar.
@@ -184,7 +185,7 @@ class Progbar(object):
             else:
                 time_per_unit = 0
             # if self.target is not None and current < self.target:
-            if self.iters < self.max_iters:
+            if self.max_iters is None or self.iters < self.max_iters:
                 eta = time_per_unit * (self.target - current)
                 if eta > 3600:
                     eta_format = '%d:%02d:%02d' % (eta // 3600,
@@ -246,7 +247,7 @@ class Progbar(object):
         self.update(self._seen_so_far + n, values)
 
 
-def torch_show_all_params(model, rank=0):
+def torch_show_all_params(model):
     params = list(model.parameters())
     k = 0
     for i in params:
@@ -254,5 +255,60 @@ def torch_show_all_params(model, rank=0):
         for j in i.size():
             l *= j
         k = k + l
-    if rank == 0:
-        print("Total param num：" + str(k))
+    return k
+
+
+def to_cuda(meta, device):
+    for k in meta:
+        meta[k] = meta[k].to(device)
+    return meta
+
+
+def get_lr_schedule_with_steps(decay_type, optimizer, drop_steps=None, gamma=None, total_steps=None):
+    def lr_lambda(current_step):
+        if decay_type == 'fix':
+            return 1.0
+        elif decay_type == 'linear':
+            return 1.0 * (current_step / total_steps)
+        elif decay_type == 'cos':
+            return 1.0 * (math.cos((current_step / total_steps) * math.pi) + 1) / 2
+        elif decay_type == 'milestone':
+            return 1.0 * math.pow(gamma, int(current_step / drop_steps))
+        else:
+            raise NotImplementedError
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def stitch_images(inputs, *outputs, img_per_row=2):
+    gap = 5
+    columns = len(outputs) + 1
+
+    width, height = inputs[0][:, :, 0].shape
+    img = Image.new('RGB',
+                    (width * img_per_row * columns + gap * (img_per_row - 1), height * int(len(inputs) / img_per_row)))
+    images = [inputs, *outputs]
+
+    for ix in range(len(inputs)):
+        xoffset = int(ix % img_per_row) * width * columns + int(ix % img_per_row) * gap
+        yoffset = int(ix / img_per_row) * height
+
+        for cat in range(len(images)):
+            im = np.array((images[cat][ix]).cpu()).astype(np.uint8).squeeze()
+            im = Image.fromarray(im)
+            img.paste(im, (xoffset + cat * width, yoffset))
+
+    return img
+
+
+def postprocess(img):
+    # [-1, 1] => [0, 255]
+    if img.shape[2] < 256:
+        img = F.interpolate(img, (256, 256))
+    img = (img + 1) / 2 * 255.0
+    img = img.permute(0, 2, 3, 1)
+    return img.int()
+
+def imsave(img, path):
+    im = Image.fromarray(img.cpu().numpy().astype(np.uint8).squeeze())
+    im.save(path)
