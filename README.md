@@ -15,4 +15,4 @@ This project only contains ablation studies for ONE-STAGE inpainting models in p
 > whether to use sn in D and G
 
 4. econv_type, dconv_type, dis_conv_type
-> control the type of convolution used in various processes in inpainting 
+> control the type of convolution used in various processes of inpainting 
