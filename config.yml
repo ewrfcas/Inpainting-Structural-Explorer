@@ -44,9 +44,9 @@ model_type: 'EC' # 'UNET', 'EC'
 layer_nums: [3,8,3] # {encoder_layers},{middle_layers},{decoder_layers}
 dis_spectral_norm: True
 gen_spectral_norm: True
-econv_type: 'gate' # 'gate', 'normal'
-dconv_type: 'gate' # 'gate', 'normal'
-dis_conv_type: 'normal' # 'gate', 'normal'
+econv_type: 'gate' # 'gate', 'normal', 'carafe'
+dconv_type: 'gate'
+dis_conv_type: 'normal'
 
 # =========================== LOSS Settings ===========================
 adv_loss_weight: 0.1

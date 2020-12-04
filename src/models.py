@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import os
 import torch.optim as optim
-from src.layers import GateConv, ResnetBlock, Conv, spectral_norm
+from src.layers import GateConv, ResnetBlock, Conv, spectral_norm, CarafeConv
 from src.loss import VGG19, PerceptualLoss, StyleLoss, AdversarialLoss
 from utils.utils import torch_show_all_params, get_lr_schedule_with_steps
 import torch.nn.functional as F
@@ -25,6 +25,8 @@ def get_generator(config, input_channel):
 def get_conv(conv_type):
     if conv_type == 'gate':
         return GateConv
+    elif conv_type == 'carafe':
+        return CarafeConv
     elif conv_type == 'normal':
         return Conv
     else:
@@ -86,6 +88,65 @@ class ECGenerator(nn.Module):
         x = self.encoder(x)
         x = self.middle(x)
         x = self.decoder(x)
+        return x
+
+
+class UNETGenerator(nn.Module):
+    def __init__(self, config, input_channel=4):
+        super(UNETGenerator, self).__init__()
+
+        econv = get_conv(config.econv_type)
+        norm = get_norm(config.norm_type)
+        ch = config.dim
+
+        # encoder
+        encoder = []
+        in_ch = input_channel
+        out_ch = ch
+        for _ in range(config.layer_nums[0]):
+            encoder.append(nn.Sequential(econv(in_channels=in_ch, out_channels=out_ch, kernel_size=4,
+                                               stride=2, padding=1, use_spectral_norm=config.gen_spectral_norm),
+                                         norm(out_ch),
+                                         nn.ReLU(True)))
+            in_ch = out_ch
+            out_ch = min(512, out_ch * 2)
+        self.encoder = nn.ModuleList(encoder)
+
+        # decoder
+        dconv = get_conv(config.dconv_type)
+        decoder = []
+        out_ch = in_ch
+        for i in range(config.layer_nums[1] - 1):
+            decoder.append(nn.Sequential(dconv(in_channels=in_ch if i == 0 else in_ch * 2, out_channels=out_ch,
+                                               kernel_size=4, stride=2, padding=1, transpose=True,
+                                               use_spectral_norm=config.gen_spectral_norm),
+                                         norm(out_ch),
+                                         nn.ReLU(True)))
+            in_ch = out_ch
+            out_ch = out_ch // 2
+
+        self.decoder = nn.ModuleList(decoder)
+        self.output = nn.Sequential(
+            dconv(in_channels=in_ch * 2, out_channels=out_ch * 2, kernel_size=4, stride=2,
+                  padding=1, transpose=True, use_spectral_norm=config.gen_spectral_norm),
+            norm(out_ch * 2),
+            nn.ReLU(True),
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=out_ch * 2, out_channels=3, kernel_size=7, padding=0),
+            nn.Tanh())
+
+    def forward(self, x, mask=None):
+        efeats = []
+        for enc in self.encoder:
+            x = enc(x)
+            efeats.append(x)
+
+        x = efeats[-1]
+        x = self.decoder[0](x)
+        for i in range(1, len(self.decoder)):
+            x = self.decoder[i](torch.cat([x, efeats[len(efeats) - 1 - i]], dim=1))
+
+        x = self.output(torch.cat([x, efeats[0]], dim=1))
         return x
 
 
