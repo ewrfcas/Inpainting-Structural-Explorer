@@ -18,6 +18,8 @@ except ImportError:
 def get_generator(config, input_channel):
     if config.model_type == 'EC':
         return ECGenerator(config, input_channel=input_channel)
+    elif config.model_type == 'UNET':
+        return UNETGenerator(config, input_channel=input_channel)
     else:
         raise NotImplementedError
 
@@ -155,7 +157,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         dis_conv = get_conv(config.dis_conv_type)
-        self.conv1 = self.features = nn.Sequential(
+        self.conv1 = nn.Sequential(
             dis_conv(in_channels=in_channels, out_channels=64, kernel_size=4, stride=2, padding=1,
                      use_spectral_norm=config.dis_spectral_norm),
             nn.LeakyReLU(0.2, inplace=True),
@@ -290,14 +292,18 @@ class Model(nn.Module):
         perceptual_losses = self.perceptual_loss(fake_img, real_img)
         perceptual_loss = 0.0
         for perceptual_loss_ in perceptual_losses:
-            mask_ = F.interpolate(mask, size=(perceptual_loss_.shape[2], perceptual_loss_.shape[3]))
-            mask_ = mask_.repeat(1, perceptual_loss_.shape[1], 1, 1)
-            mask_sum = torch.sum(mask_, dim=[2, 3]) + self.eps
-            valid_sum = torch.sum(1 - mask_, dim=[2, 3]) + self.eps
-            mask_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * mask_, dim=[2, 3]) / mask_sum)
-            valid_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * (1 - mask_), dim=[2, 3]) / valid_sum)
-            perceptual_loss += (mask_perceptual_loss * self.config.mask_vgg_loss_weight + \
-                                valid_perceptual_loss * self.config.valid_vgg_loss_weight)
+            if self.config.mean_vgg_loss:
+                perceptual_loss += (torch.mean(perceptual_loss_) * (self.config.mask_vgg_loss_weight +
+                                                                    self.config.valid_vgg_loss_weight))
+            else:
+                mask_ = F.interpolate(mask, size=(perceptual_loss_.shape[2], perceptual_loss_.shape[3]))
+                mask_ = mask_.repeat(1, perceptual_loss_.shape[1], 1, 1)
+                mask_sum = torch.sum(mask_, dim=[2, 3]) + self.eps
+                valid_sum = torch.sum(1 - mask_, dim=[2, 3]) + self.eps
+                mask_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * mask_, dim=[2, 3]) / mask_sum)
+                valid_perceptual_loss = torch.mean(torch.sum(perceptual_loss_ * (1 - mask_), dim=[2, 3]) / valid_sum)
+                perceptual_loss += (mask_perceptual_loss * self.config.mask_vgg_loss_weight + \
+                                    valid_perceptual_loss * self.config.valid_vgg_loss_weight)
         g_loss += perceptual_loss
 
         # generator style loss

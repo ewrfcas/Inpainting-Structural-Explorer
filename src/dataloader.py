@@ -46,6 +46,7 @@ class InpaintingDataset(torch.utils.data.Dataset):
         size = self.config.input_size
         # load image
         img = cv2.imread(self.data[index])[:, :, ::-1]
+        img_h = img.copy()
 
         # resize/crop if needed
         img = self.resize(img, size, size, center_crop=self.config.center_crop)
@@ -64,8 +65,10 @@ class InpaintingDataset(torch.utils.data.Dataset):
 
         img = self.to_tensor(img, norm=True)  # norm to -1~1
         mask = self.to_tensor(mask)
-
         meta = {'img': img, 'mask': mask}
+        if img_h is not None:
+            img_h = self.to_tensor(img_h, norm=True)
+            meta['img_h'] = img_h
 
         return meta
 
@@ -107,7 +110,11 @@ class InpaintingDataset(torch.utils.data.Dataset):
             i = (imgw - side) // 2
             img = img[j:j + side, i:i + side, ...]
 
-        img = cv2.resize(img, (height, width))
+        if imgh > height and imgw > width:
+            inter = cv2.INTER_AREA
+        else:
+            inter = cv2.INTER_LINEAR
+        img = cv2.resize(img, (height, width), interpolation=inter)
 
         return img
 

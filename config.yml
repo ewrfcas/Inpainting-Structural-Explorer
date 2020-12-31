@@ -50,11 +50,12 @@ dis_conv_type: 'normal'
 
 # =========================== LOSS Settings ===========================
 adv_loss_weight: 0.1
-mask_l1_loss_weight: 2.5
+mask_l1_loss_weight: 0.5
 valid_l1_loss_weight: 0.5
 vgg_loss: True
-mask_vgg_loss_weight: 0.25
+mask_vgg_loss_weight: 0.05
 valid_vgg_loss_weight: 0.05
+mean_vgg_loss: False
 vgg_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
 vgg_norm: True
 style_loss_weight: 250
@@ -65,7 +66,7 @@ g_lr: 3e-4
 beta1: 0                    # adam optimizer beta1
 beta2: 0.9                  # adam optimizer beta2
 batch_size: 32
-max_iters: 150000
+max_iters: 200000
 decay_type: 'milestone'
 drop_steps: 30000
 drop_gamma: 0.5

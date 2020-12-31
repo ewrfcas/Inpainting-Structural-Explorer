@@ -13,6 +13,11 @@ from src.dataloader import InpaintingDataset
 from src.models import Model
 import time
 
+# combine image with origin images
+def image_combine(source, target, mask):
+    res = source * (1 - mask) + target * mask  # [b,3,h,w]
+    return res
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', type=str, required=True, help='model checkpoints path')
@@ -127,6 +132,7 @@ if __name__ == '__main__':
                     items = next(sample_iterator)
                     items = to_cuda(items, config.device)
                     fake_img = model(items['img'], items['mask'])
+                    fake_img = image_combine(items['img'], fake_img, items['mask'])
 
                     images = stitch_images(postprocess(items['img']),
                                            postprocess(items['img'] * (1 - items['mask']) + items['mask']),
@@ -145,6 +151,7 @@ if __name__ == '__main__':
                     for items in val_loader:
                         items = to_cuda(items, config.device)
                         fake_img = model(items['img'], items['mask'])
+                        fake_img = image_combine(items['img'], fake_img, items['mask'])
                         fake_img = postprocess(fake_img)  # [b, h, w, 3]
                         for i in range(fake_img.shape[0]):
                             sample_name = os.path.join(args.path, 'eval', val_dataset.load_name(index))
@@ -167,3 +174,5 @@ if __name__ == '__main__':
             if iteration >= config.max_iters:
                 keep_training = False
                 break
+
+    logger.info('Best score: ' + str(best_score))
